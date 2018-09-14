@@ -34,7 +34,7 @@ baseline-image:
   stage: baseline
   image: atulabhi/kops:v8
   script:
-    #- pwd
+    - pwd
     #- git clone https://github.com/itsmesinghavneet/baseline.git
     #- cd baseline
     #- wget https://raw.githubusercontent.com/harshvkarn/test-1/baseline/platforms/commit-writer/write-commit.yml
