@@ -19,7 +19,7 @@ stages:
 
 build-jiva:
    stage: build
-   image: ubuntu:16.04
+   image: atulabhi/kops:v8
    before_script:
      - export COMMIT=${CI_COMMIT_SHA:0:8}
      #- sudo apt-get install -y
