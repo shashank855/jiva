@@ -31,6 +31,7 @@ build-jiva:
     - pwd
     - ls
     - make build
+    - ls
 
 baseline-image:
   stage: baseline
