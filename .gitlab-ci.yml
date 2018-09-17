@@ -28,6 +28,8 @@ build-jiva:
    script: 
     - echo "Building-Jiva"
     - echo $COMMIT
+    - pwd
+    - ls
     - make build
 
 baseline-image:
