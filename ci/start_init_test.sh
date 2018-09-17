@@ -205,6 +205,29 @@ verify_controller_quorum() {
 		i=`expr $i + 1`
 	done
 }
+# This verifies the goroutine leaks which happens when a request is made to
+# replica_ip:9503.
+verify_go_routine_leak() {
+    i=0
+    date
+    no_of_goroutine=`curl http://$2:9502/debug/pprof/goroutine?debug=1 | grep goroutine | awk '{ print $4}'`
+    passed=0
+    req_cnt=0
+    while [ "$i" != 30 ]; do
+            curl http://$2:9503 &
+            i=`expr $i + 1`
+            sleep 2
+    done
+    wait
+    new_no_of_goroutine=`curl http://$2:9502/debug/pprof/goroutine?debug=1 | grep goroutine | awk '{ print $4}'`
+    old=`expr $no_of_goroutine + 3`
+    if [ $new_no_of_goroutine -lt $old ]; then
+             echo $1 --passed
+             return
+    fi
+    echo $1 " -- failed"
+    collect_logs_and_exit
+}
 
 verify_vol_status() {
 	i=0
@@ -333,7 +356,7 @@ start_replica() {
 # start_controller CONTROLLER_IP (debug build)
 start_debug_controller() {
 	controller_id=$(docker run -d --net stg-net --ip $1 -P --expose 3260 --expose 9501 --expose 9502-9504 $JI_DEBUG \
-			env REPLICATION_FACTOR="$3" launch controller --frontend gotgt --frontendIP "$1" "$2")
+			env REPLICATION_FACTOR="$3" DEBUG_TIMEOUT="5" launch controller --frontend gotgt --frontendIP "$1" "$2")
 	echo "$controller_id"
 }
 
@@ -349,6 +372,64 @@ get_replica_count() {
 	replicaCount=`curl http://"$1":9501/v1/volumes | jq '.data[0].replicaCount'`
 	echo "$replicaCount"
 }
+
+#verify_delete_replica_unsuccess verifies that when RF condition is not met
+#the replicas will not be deleted and error will be returned that replica
+#count is not equal to the RF.
+verify_delete_replica_unsuccess() {
+    expected_error="Error deleting replica" 
+    error=$(curl -X "POST" http://$CONTROLLER_IP:9501/v1/delete | jq '.replicas[0].msg' | tr -d '"')
+    if [ "$error" != "$expected_error" ]; then
+               echo $2"  --failed"
+        collect_logs_and_exit
+    fi
+    #verify whether number of replicas are still the same as it was sent or nor.
+    verify_replica_cnt "$1" "$2"
+    echo $2"  --passed"
+    return
+}
+
+#verify_delete_replica verifies that if the replication factor condition
+#is met then it will delete the replicas. So before calling this function
+#ensure that number of replicas should be equal to the RF.
+verify_delete_replica() {
+    old_replica_count=$(get_replica_count $CONTROLLER_IP)
+    echo "$old_replica_count"
+    curl -X "POST" http://$CONTROLLER_IP:9501/v1/delete | jq
+    new_replica_count=$(get_replica_count $CONTROLLER_IP)
+    echo "$new_replica_count"
+    verify_replica_cnt "0" "Zero replica count test"
+}
+
+test_two_replica_delete() {
+	echo "----------------Test_two_replica_delete--------------"
+	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "2")
+	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
+	replica2_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2")
+	sleep 5
+	verify_replica_cnt "2" "Two replica count test1"
+	# This will delay sync between replicas
+	run_ios_to_test_stop_start
+	verify_delete_replica "Delete replicas test2"
+
+	docker stop $replica1_id
+	docker stop $replica2_id
+	sleep 5
+
+	docker start $replica1_id
+	docker start $replica2_id
+	sleep 5
+	verify_replica_cnt "2" "Two replica count test3"
+
+	docker stop $replica1_id
+	verify_replica_cnt "1" "One replica count test4"
+	verify_delete_replica_unsuccess "1" "Delete replicas with RF=2 and 1 registered replica test5"
+
+	docker stop $replica2_id
+	docker stop $orig_controller_id
+	cleanup
+}
+
 
 test_single_replica_stop_start() {
 	echo "----------------Test_single_replica_stop_start--------------"
@@ -379,7 +460,7 @@ test_single_replica_stop_start() {
 # to other replica after verifying the replication factor.
 test_replica_ip_change() {
 	echo "----------------Test_replica_ip_change---------------"
-	start_debug_controller "$CONTROLLER_IP" "store1" "2"
+	debug_controller_id=$(start_debug_controller "$CONTROLLER_IP" "store1" "2")
 	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
 	start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2"
 	sleep 1
@@ -390,6 +471,7 @@ test_replica_ip_change() {
 	docker stop $replica1_id
 	sleep 3
 
+	curl -k --data "{ \"timeout\":\"0\" }" -H "Content-Type:application/json" -XPOST $CONTROLLER_IP:9501/timeout
 	echo "Starting another replica with different IP: $REPLICA_IP3"
 	# start the other replica and wait for any one of the two replicas to be
 	# registered and get 'start' signal.
@@ -421,6 +503,7 @@ test_two_replica_stop_start() {
 
 	verify_controller_quorum "2" "when there are 2 replicas and one is restarted"
 	verify_vol_status "RW" "when there are 2 replicas and one is restarted"
+	verify_go_routine_leak "when there are 2 replicas, and sending curl request on data address to" "$REPLICA_IP1"
 
 	count=0
 	while [ "$count" != 5 ]; do
@@ -811,8 +894,50 @@ verify_clone_status() {
 	echo "0"
 }
 
+# test_extent_support_file_system tests whether the file system supports
+# extent mapping. If it doesnot replica will error out.
+# Creating a file system of FAT type which doesn't support extent mapping.
+test_extent_support_file_system() {
+	echo "-----------Run_extent_supported_file_system_test-------------"
+	mkdir -p /tmp/vol1
+	# create a file
+	truncate -s 2100M testfat
+	# losetup is used to associate block device
+	# get the free device
+	device=$(sudo losetup -f)
+	# attach the loopback device with regular disk file testfat
+	losetup $device testfat
+	# create a FAT file system
+	mkfs.fat testfat
+	# mount as a block device in /tmp/vol1
+	mount $device /tmp/vol1
+
+	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "1")
+	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
+	sleep 5
+
+	verify_replica_cnt "0" "Zero replica count test1"
+
+	error=$(docker logs $replica1_id 2>&1 | grep -w "underlying file system does not support extent mapping")
+	count=$(echo $error | wc -l)
+
+	if [ "$count" -eq 0  ]; then
+		echo "extent supported file system test failed"
+		umount /tmp/vol1
+		losetup -d $device
+		collect_logs_and_exit
+	else
+		echo "extent support file system test --passed"
+	fi
+	umount /tmp/vol1
+	losetup -d $device
+	cleanup
+}
+
+
 prepare_test_env
 test_single_replica_stop_start
+test_two_replica_delete
 test_replica_ip_change
 test_two_replica_stop_start
 test_three_replica_stop_start
@@ -821,5 +946,6 @@ test_replica_reregistration
 run_data_integrity_test
 create_snapshot "$CONTROLLER_IP"
 test_clone_feature
+test_extent_support_file_system
 run_vdbench_test_on_volume
 run_libiscsi_test_suite

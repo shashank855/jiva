@@ -123,11 +123,11 @@ func CreateTempReplica() (*Replica, error) {
 		ReplicaStartTime: StartTime,
 	}
 	if err := r.initRevisionCounter(); err != nil {
-		logrus.Errorf("Error in initRevisionCounter, err:%v", err)
+		logrus.Errorf("Error in initializing revision counter while creating temp replica")
 		return nil, err
 	}
 	if err := r.initPeerDetails(); err != nil {
-		logrus.Errorf("Error in initPeerDetails, err:%v", err)
+		logrus.Errorf("Error in initializing peer details while creating temp replica")
 		return nil, err
 	}
 	return r, nil
@@ -160,7 +160,7 @@ func construct(readonly bool, size, sectorSize int64, dir, head string, backingF
 	}
 
 	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
-		logrus.Errorf("Error %v in mkdir %v", err, dir)
+		logrus.Errorf("failed to create directory: %s", dir)
 		return nil, err
 	}
 
@@ -224,7 +224,11 @@ func construct(readonly bool, size, sectorSize int64, dir, head string, backingF
 	r.insertBackingFile()
 	r.ReplicaType = replicaType
 
-	PreloadLunMap(&r.volume)
+	if err := PreloadLunMap(&r.volume); err != nil {
+		logrus.Error("underlying file system does not support extent mapping")
+		return r, err
+	}
+
 	return r, r.writeVolumeMetaData(true, r.info.Rebuilding)
 }
 
@@ -618,18 +622,18 @@ func (r *Replica) encodeToFile(obj interface{}, file string) error {
 
 	f, err := os.Create(r.diskPath(file + ".tmp"))
 	if err != nil {
-		logrus.Errorf("Error %v in creating tmp file %s", err, file)
+		logrus.Errorf("failed to create temp file: %s while encoding the data to file", file)
 		return err
 	}
 	defer f.Close()
 
 	if err := json.NewEncoder(f).Encode(&obj); err != nil {
-		logrus.Errorf("Error %v in encoder to file %s", err, file)
+		logrus.Errorf("failed to encode the data to file: %s", f.Name())
 		return err
 	}
 
 	if err := f.Close(); err != nil {
-		logrus.Errorf("Error %v in encoder while closing file %s", err, file)
+		logrus.Errorf("failed to close file after encoding to file: %s", f.Name())
 		return err
 	}
 
@@ -895,7 +899,7 @@ func (r *Replica) openLiveChain() error {
 		parent := chain[i]
 		f, err := r.openFile(parent, 0)
 		if err != nil {
-			logrus.Errorf("error %v in openFile %s", err, parent)
+			logrus.Error("failed to open live chain with existing parent: ", parent)
 			return err
 		}
 
@@ -919,7 +923,7 @@ func (r *Replica) readMetadata() (bool, error) {
 	for _, file := range files {
 		if file.Name() == volumeMetaData {
 			if err := r.unmarshalFile(file.Name(), &r.info); err != nil {
-				logrus.Errorf("Error %v in unmarshalFile %s", err, file.Name())
+				logrus.Errorf("failed to read metadata, error in unmarshalling file: %s", file.Name())
 				return false, err
 			}
 			r.volume.sectorSize = defaultSectorSize
@@ -948,7 +952,7 @@ func (r *Replica) readMetadata() (bool, error) {
 func (r *Replica) readDiskData(file string) error {
 	var data disk
 	if err := r.unmarshalFile(file, &data); err != nil {
-		logrus.Errorf("Error %v in unmarshalFile %s during readDisk", err, file)
+		logrus.Errorf("failed to read disk data, error while unmarshalling file: %s", file)
 		return err
 	}
 
@@ -986,12 +990,34 @@ func (r *Replica) Delete() error {
 
 	for name := range r.diskData {
 		if name != r.info.BackingFileName {
-			r.rmDisk(name)
+			if err := r.rmDisk(name); err != nil {
+				logrus.Error("Error in removing disk data, error : ", err.Error())
+				return err
+			}
 		}
 	}
 
-	os.Remove(r.diskPath(volumeMetaData))
-	os.Remove(r.diskPath(revisionCounterFile))
+	err := os.Remove(r.diskPath(volumeMetaData))
+	if err != nil {
+		logrus.Error("Error in removing volume metadata, error : ", err.Error())
+		return err
+	}
+	err = os.Remove(r.diskPath(revisionCounterFile))
+	if err != nil {
+		logrus.Error("Error in removing revision counter file, error : ", err.Error())
+		return err
+	}
+	return nil
+}
+
+func (r *Replica) DeleteAll() error {
+	r.Lock()
+	defer r.Unlock()
+
+	if err := os.RemoveAll(r.dir); err != nil {
+		logrus.Error("Error in deleting the directory contents, error : ", err.Error())
+		return err
+	}
 	return nil
 }
 

@@ -10,6 +10,15 @@ import (
 	"github.com/rancher/go-rancher/client"
 )
 
+type Timeout struct {
+	client.Resource
+	Timeout string `json:"timeout"`
+}
+
+type DeleteReplicaOutput struct {
+	client.Resource
+	DeletedReplicas
+}
 type Replica struct {
 	client.Resource
 	Address string `json:"address"`
@@ -213,6 +222,10 @@ func NewSchema() *client.Schemas {
 			Output: "snapshotOutput",
 		},
 	}
+	deleteReplica := schemas.AddType("delete", DeleteReplicaOutput{})
+	deleteReplica.ResourceMethods = []string{"POST"}
+	timeout := schemas.AddType("timeout", Timeout{})
+	timeout.ResourceMethods = []string{"POST"}
 
 	return schemas
 }
