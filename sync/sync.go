@@ -186,11 +186,10 @@ Register:
 
 	if volume.ReplicaCount == 0 {
 		revisionCount := Replica.GetRevisionCounter()
-		peerDetails, _ := Replica.GetPeerDetails()
 		replicaType := "quorum"
 		upTime := time.Since(Replica.ReplicaStartTime)
 		state, _ := server.PrevStatus()
-		_ = t.client.Register(parts[0], revisionCount, peerDetails, replicaType, upTime, string(state))
+		_ = t.client.Register(parts[0], revisionCount, replicaType, upTime, string(state))
 		select {
 		case <-ticker.C:
 			goto Register
@@ -290,33 +289,29 @@ func (t *Task) AddReplica(replicaAddress string, s *replica.Server) error {
 	defer ticker.Stop()
 	Replica, err := replica.CreateTempReplica()
 	if err != nil {
-		logrus.Errorf("CreateTempReplica failed, err: %v", err)
-		return err
+		return fmt.Errorf("failed to create temp replica, error: %s", err.Error())
 	}
 	server, err := replica.CreateTempServer()
 	if err != nil {
-		logrus.Errorf("CreateTempServer failed, err: %v", err)
-		return err
+		return fmt.Errorf("failed to create temp server, error: %s", err.Error())
 	}
 Register:
 	logrus.Infof("Get Volume info from controller")
 	volume, err := t.client.GetVolume()
 	if err != nil {
-		logrus.Errorf("Get volume info failed, err: %v", err)
-		return err
+		return fmt.Errorf("failed to get volume info, error: %s", err.Error())
 	}
 	addr := strings.Split(replicaAddress, "://")
 	parts := strings.Split(addr[1], ":")
 	if volume.ReplicaCount == 0 {
 		revisionCount := Replica.GetRevisionCounter()
-		peerDetails, _ := Replica.GetPeerDetails()
 		replicaType := "Backend"
 		upTime := time.Since(Replica.ReplicaStartTime)
 		state, _ := server.PrevStatus()
 		logrus.Infof("Register replica at controller")
-		err := t.client.Register(parts[0], revisionCount, peerDetails, replicaType, upTime, string(state))
+		err := t.client.Register(parts[0], revisionCount, replicaType, upTime, string(state))
 		if err != nil {
-			logrus.Errorf("Error in sending register command, err: %v", err)
+			logrus.Errorf("Error in sending register command, error: %s", err)
 		}
 		select {
 		case <-ticker.C:
@@ -331,35 +326,30 @@ Register:
 	}
 	logrus.Infof("CheckAndResetFailedRebuild %v", replicaAddress)
 	if err := t.checkAndResetFailedRebuild(replicaAddress, s); err != nil {
-		logrus.Errorf("CheckAndResetFailedRebuild failed, err:%v", err)
-		return err
+		return fmt.Errorf("CheckAndResetFailedRebuild failed, error: %s", err.Error())
 	}
 
 	logrus.Infof("Adding replica %s in WO mode", replicaAddress)
 	_, err = t.client.CreateReplica(replicaAddress)
 	if err != nil {
-		logrus.Errorf("CreateReplica failed, err:%v", err)
 		return err
 	}
 
 	logrus.Infof("getTransferClients %v", replicaAddress)
 	fromClient, toClient, err := t.getTransferClients(replicaAddress)
 	if err != nil {
-		logrus.Errorf("getTransferClients failed, err:%v", err)
-		return err
+		return fmt.Errorf("failed to get transfer clients, error: %s", err.Error())
 	}
 
 	logrus.Infof("SetRebuilding %v", replicaAddress)
 	if err := toClient.SetRebuilding(true); err != nil {
-		logrus.Errorf("SetRebuilding failed, err:%v", err)
-		return err
+		return fmt.Errorf("failed to set rebuilding: true, error: %s", err.Error())
 	}
 
 	logrus.Infof("PrepareRebuild %v", replicaAddress)
 	output, err := t.client.PrepareRebuild(rest.EncodeID(replicaAddress))
 	if err != nil {
-		logrus.Errorf("PrepareRebuild failed, err:%v", err)
-		return err
+		return fmt.Errorf("failed to prepare rebuild, error: %s", err.Error())
 	}
 
 	logrus.Infof("syncFiles from:%v to:%v", fromClient, toClient)

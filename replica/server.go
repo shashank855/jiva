@@ -77,7 +77,13 @@ func (s *Server) getSize(size int64) int64 {
 func (s *Server) Create(size int64) error {
 	s.Lock()
 	defer s.Unlock()
-
+	if err := os.Mkdir(s.dir, 0700); err != nil && !os.IsExist(err) {
+		logrus.Errorf("failed to create directory: %s", s.dir)
+		return err
+	}
+	if err := isExtentSupported(s.dir); err != nil {
+		return err
+	}
 	state, _ := s.Status()
 
 	if state != Initial {
@@ -195,18 +201,14 @@ func (s *Server) PrevStatus() (State, Info) {
 func (s *Server) Stats() *types.Stats {
 	r := s.r
 	var revisionCache int64
-	var replicaCount int64
 
 	revisionCache = 0
-	replicaCount = 0
 	if r != nil {
 		revisionCache = r.revisionCache
-		replicaCount = int64(r.peerCache.ReplicaCount)
 	}
 
 	stats1 := &types.Stats{
 		RevisionCounter: revisionCache,
-		ReplicaCounter:  replicaCount,
 	}
 	return stats1
 }
@@ -420,18 +422,6 @@ func (s *Server) SetRevisionCounter(counter int64) error {
 		return nil
 	}
 	return s.r.SetRevisionCounter(counter)
-}
-
-func (s *Server) UpdatePeerDetails(peerDetails types.PeerDetails) error {
-
-	s.Lock()
-	defer s.Unlock()
-
-	if s.r == nil {
-		logrus.Infof("s.r is nil during updatePeerDetails")
-		return nil
-	}
-	return s.r.UpdatePeerDetails(peerDetails)
 }
 
 func (s *Server) PingResponse() error {

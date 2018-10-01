@@ -103,22 +103,25 @@ func (c *Controller) RegisterReplica(register types.RegReplica) error {
 	return c.registerReplica(register)
 }
 
-func (c *Controller) hasWOReplica() bool {
+func (c *Controller) hasWOReplica() (string, bool) {
+	logrus.Info("check if any WO replica available")
 	for _, i := range c.replicas {
 		if i.Mode == types.WO {
-			return true
+			return i.Address, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func (c *Controller) canAdd(address string) (bool, error) {
 	if c.hasReplica(address) {
-		return false, fmt.Errorf("%s is already added", address)
+		logrus.Warning("replica %s is already added with this controller instance", address)
+		return false, fmt.Errorf("replica: %s is already added", address)
 	}
-	if c.hasWOReplica() {
-		return false, fmt.Errorf("Can only have one WO replica %s at a time",
-			address)
+	if woReplica, ok := c.hasWOReplica(); ok {
+		logrus.Warning("can have only one WO replica at a time, found WO replica: %s", woReplica)
+		return false, fmt.Errorf("can only have one WO replica at a time, found WO Replica: %s",
+			woReplica)
 	}
 	return true, nil
 }
@@ -181,10 +184,6 @@ func (c *Controller) addQuorumReplica(address string, snapshot bool) error {
 		return fmt.Errorf("Fail to set revision counter for %v: %v", address, err)
 	}
 
-	if err := c.backend.UpdatePeerDetails(c.replicaCount, c.quorumReplicaCount); err != nil {
-		return fmt.Errorf("Fail to set revision counter for %v: %v", address, err)
-	}
-
 	if err := c.backend.SetRebuilding(address, false); err != nil {
 		return fmt.Errorf("Failed to set rebuild : %v", true)
 	}
@@ -200,15 +199,29 @@ func (c *Controller) addQuorumReplica(address string, snapshot bool) error {
 	return nil
 }
 
+func (c *Controller) verifyReplicationFactor() error {
+	replicationFactor := util.CheckReplicationFactor()
+	if replicationFactor == 0 {
+		return fmt.Errorf("REPLICATION_FACTOR not set")
+	}
+	if replicationFactor == len(c.replicas) {
+		return fmt.Errorf("replication factor: %v, added replicas: %v", replicationFactor, len(c.replicas))
+	}
+	return nil
+}
+
 func (c *Controller) addReplica(address string, snapshot bool) error {
 	c.Lock()
 	if ok, err := c.canAdd(address); !ok {
 		c.Unlock()
-		logrus.Infof("addReplica %s cant add %v", address, err)
 		return err
 	}
+	logrus.Info("verify replication factor")
+	if err := c.verifyReplicationFactor(); err != nil {
+		c.Unlock()
+		return fmt.Errorf("can't add %s, error: %v", address, err)
+	}
 	c.Unlock()
-
 	newBackend, err := c.factory.Create(address)
 	if err != nil {
 		logrus.Infof("remote creation addreplica failed %v", err)
@@ -234,8 +247,8 @@ func (c *Controller) signalToAdd() {
 func (c *Controller) registerReplica(register types.RegReplica) error {
 	c.Lock()
 	defer c.Unlock()
-	logrus.Infof("Register Replica, Address: %v Uptime: %v State: %v Type: %v RevisionCount: %v PeerCount: %v",
-		register.Address, register.UpTime, register.RepState, register.RepType, register.RevCount, register.PeerDetail.ReplicaCount)
+	logrus.Infof("Register Replica, Address: %v Uptime: %v State: %v Type: %v RevisionCount: %v",
+		register.Address, register.UpTime, register.RepState, register.RepType, register.RevCount)
 
 	_, ok := c.RegisteredReplicas[register.Address]
 	if !ok {
@@ -244,12 +257,6 @@ func (c *Controller) registerReplica(register types.RegReplica) error {
 			logrus.Infof("Quorum replica Address %v already present in registered list", register.Address)
 			return nil
 		}
-	}
-	if c.quorumReplicaCount < register.PeerDetail.QuorumReplicaCount {
-		c.quorumReplicaCount = register.PeerDetail.QuorumReplicaCount
-	}
-	if c.replicaCount < register.PeerDetail.ReplicaCount {
-		c.replicaCount = register.PeerDetail.ReplicaCount
 	}
 
 	if register.RepType == "quorum" {
@@ -320,6 +327,25 @@ func (c *Controller) signalReplica() error {
 	return nil
 }
 
+// IsSnapShotExist verifies whether snapshot with the given name
+// already exists in the given replica.
+func IsSnapShotExist(snapName string, addr string) (bool, error) {
+	chain, err := getReplicaChain(addr)
+	if err != nil {
+		return false, fmt.Errorf("Failed to get replica chain, error: %v", err)
+	}
+	if len(chain) == 0 {
+		return false, fmt.Errorf("No chain list found in replica")
+	}
+	snapshot := fmt.Sprintf("volume-snap-%s.img", snapName)
+	for _, val := range chain {
+		if val == snapshot {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (c *Controller) Snapshot(name string) (string, error) {
 	c.Lock()
 	defer c.Unlock()
@@ -334,6 +360,19 @@ func (c *Controller) Snapshot(name string) (string, error) {
 		return "", fmt.Errorf("Too many snapshots created")
 	}
 
+	replica, err := c.getRWReplica()
+	if err != nil {
+		return name, err
+	}
+
+	ok, err := IsSnapShotExist(name, replica.Address)
+	if err != nil {
+		return name, fmt.Errorf("Failed to create snapshot, error: %v", err)
+	}
+
+	if ok {
+		return name, fmt.Errorf("Snapshot: %s already exists", name)
+	}
 	created := util.Now()
 	return name, c.handleErrorNoLock(c.backend.Snapshot(name, true, created))
 }
@@ -438,6 +477,7 @@ func (c *Controller) addReplicaNoLock(newBackend types.Backend, address string, 
 			newBackend.Close()
 			return err
 		}
+		// This replica is not added to backend yet
 		if err = newBackend.Snapshot(uuid, false, created); err != nil {
 			newBackend.Close()
 			return err
@@ -457,6 +497,7 @@ func (c *Controller) addReplicaNoLock(newBackend types.Backend, address string, 
 }
 
 func (c *Controller) hasReplica(address string) bool {
+	logrus.Infof("check if replica %s is already added", address)
 	for _, i := range c.replicas {
 		if i.Address == address {
 			return true

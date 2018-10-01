@@ -126,10 +126,6 @@ func CreateTempReplica() (*Replica, error) {
 		logrus.Errorf("Error in initializing revision counter while creating temp replica")
 		return nil, err
 	}
-	if err := r.initPeerDetails(); err != nil {
-		logrus.Errorf("Error in initializing peer details while creating temp replica")
-		return nil, err
-	}
 	return r, nil
 }
 
@@ -187,10 +183,6 @@ func construct(readonly bool, size, sectorSize int64, dir, head string, backingF
 		return nil, err
 	}
 
-	if err := r.initPeerDetails(); err != nil {
-		return nil, err
-	}
-
 	// Reference r.info.Size because it may have changed from reading
 	// metadata
 	locationSize := r.info.Size / r.volume.sectorSize
@@ -225,8 +217,7 @@ func construct(readonly bool, size, sectorSize int64, dir, head string, backingF
 	r.ReplicaType = replicaType
 
 	if err := PreloadLunMap(&r.volume); err != nil {
-		logrus.Error("underlying file system does not support extent mapping")
-		return r, err
+		return r, fmt.Errorf("failed to load Lun map, error: %v", err)
 	}
 
 	return r, r.writeVolumeMetaData(true, r.info.Rebuilding)

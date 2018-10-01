@@ -113,7 +113,7 @@ verify_rw_status() {
 			rw_status="RW"
 		fi
 		i=`expr $i + 1`
-		if [ "$i" == 50 ]; then
+		if [ "$i" == 100 ]; then
 			echo "1"
 			return
 		fi
@@ -363,7 +363,7 @@ start_debug_controller() {
 # start_cloned_replica CONTROLLER_IP  CLONED_CONTROLLER_IP CLONED_REPLICA_IP folder_name
 start_cloned_replica() {
 	cloned_replica_id=$(docker run -d -it --net stg-net --ip "$3" -P --expose 9502-9504 -v /tmp/"$4":/"$4" $JI \
-		launch replica --type clone --snapName snap1 --cloneIP "$1" --frontendIP "$2" --listen "$3":9502 --size 2g /"$4")
+		launch replica --type clone --snapName snap3 --cloneIP "$1" --frontendIP "$2" --listen "$3":9502 --size 2g /"$4")
 	echo "$cloned_replica_id"
 }
 
@@ -430,6 +430,33 @@ test_two_replica_delete() {
 	cleanup
 }
 
+test_replication_factor() {
+	echo "----------------Test_replication_factor--------------"
+	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "1")
+	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
+	verify_replica_cnt "1" "Single replica count test"
+	replica2_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2")
+	sleep 5
+
+	verify_replica_cnt "1" "Single replica count test"
+	add_replica_exit=$(docker logs $orig_controller_id 2>&1 | grep "error: replication factor: 1, added replicas: 1" | wc -l)
+	if [ "$add_replica_exit" == 0 ]; then
+		collect_logs_and_exit
+	fi
+
+	sudo docker stop $replica1_id
+	sudo docker start $replica1_id
+	sleep 5
+
+	verify_replica_cnt "1" "Single replica count test"
+	add_replica_exit=$(docker logs $orig_controller_id 2>&1 | grep "error: replication factor: 1, added replicas: 1" | wc -l)
+	if [ "$add_replica_exit" == 0 ]; then
+		collect_logs_and_exit
+	fi
+
+	echo "test_replication_factor --passed"
+	cleanup
+}
 
 test_single_replica_stop_start() {
 	echo "----------------Test_single_replica_stop_start--------------"
@@ -800,14 +827,11 @@ get_scsi_disk() {
 	done
 }
 
-run_data_integrity_test() {
-	echo "--------------------Run_data_integrity_test------------------"
-	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "3")
-	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
-	replica2_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2")
-	replica3_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP3" "vol3")
 
-	sleep 5
+# in this test we write some data on the block device
+# and then verify whether data saved into the replicas
+# are same.
+test_data_integrity() {
 	login_to_volume "$CONTROLLER_IP:3260"
 	sleep 5
 	get_scsi_disk
@@ -817,8 +841,15 @@ run_data_integrity_test() {
 		mount /dev/$device_name /mnt/store
 
 		dd if=/dev/urandom of=file1 bs=4k count=10000
-		hash1=$(md5sum file1 | awk '{print $1}')
+        hash1=$(md5sum file1 | awk '{print $1}')
 		cp file1 /mnt/store
+		umount /mnt/store
+		logout_of_volume
+	    login_to_volume "$CONTROLLER_IP:3260"
+	    get_scsi_disk
+	    sleep 5
+		mount /dev/$device_name /mnt/store
+
 		hash2=$(md5sum /mnt/store/file1 | awk '{print $1}')
 		if [ $hash1 == $hash2 ]; then echo "DI Test: PASSED"
 		else
@@ -834,17 +865,54 @@ run_data_integrity_test() {
 	else
 		echo "Unable to detect iSCSI device, login failed"; collect_logs_and_exit
 	fi
-	#Cleanup is not being performed here because this data will be used to test clone feature in the next test
 }
 
+run_data_integrity_test() {
+	echo "--------------------Run_data_integrity_test------------------"
+	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "3")
+	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
+	replica2_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2")
+	replica3_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP3" "vol3")
+	sleep 5
+	test_data_integrity
+	#Cleanup is not being performed here because this data will be used
+	#to test snapshot feature in the next test.
+    # value of hash1 will be used for clone.
+}
+
+# create_and_verify_snapshot creates a snapshot and verifies if it
+# has message given below (success case) or not (failure case).
+# As a part of negative test we are trying to create the snapshot with the
+# same name which returns snapshot_exists.
 create_snapshot() {
-	echo "--------------create_snapshot-------------"
-	id=`curl http://$1:9501/v1/volumes | jq '.data[0].id' |  tr -d '"'`
-	curl -H "Content-Type: application/json" -X POST -d '{"name":"snap1"}' http://$CONTROLLER_IP:9501/v1/volumes/$id?action=snapshot
+	message=`curl -H "Content-Type: application/json" -X POST -d '{"name":"'$2'"}' http://$CONTROLLER_IP:9501/v1/volumes/$1?action=snapshot | jq '.message' | tr -d '"'`
+	if [ "$message" == "$3" ] ;
+	then
+		echo "create snapshot test passed"
+	else
+		echo "create snapshot test failed"
+		collect_logs_and_exit
+	fi;
+}
+
+test_duplicate_snapshot_failure() {
+	echo "--------------create_and_verify_snapshot-------------"
+	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "3")
+	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
+	replica2_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2")
+	id=`curl http://$CONTROLLER_IP:9501/v1/volumes | jq '.data[0].id' |  tr -d '"'`
+	create_snapshot $id "snap1" "Snapshot: snap1 created successfully"
+	create_snapshot $id "snap1" "Snapshot: snap1 already exists"
+	create_snapshot $id "snap2" "Snapshot: snap2 created successfully"
+	sleep 5
+	test_data_integrity
+    cleanup
 }
 
 test_clone_feature() {
 	echo "-----------------------Test_clone_feature-------------------------"
+    id=`curl http://$CONTROLLER_IP:9501/v1/volumes | jq '.data[0].id' |  tr -d '"'`
+    create_snapshot $id "snap3" "Snapshot: snap3 created successfully"
 	cloned_controller_id=$(start_controller "$CLONED_CONTROLLER_IP" "store2" "1")
 	start_cloned_replica "$CONTROLLER_IP"  "$CLONED_CONTROLLER_IP" "$CLONED_REPLICA_IP" "vol4"
 
@@ -894,49 +962,129 @@ verify_clone_status() {
 	echo "0"
 }
 
-# test_extent_support_file_system tests whether the file system supports
-# extent mapping. If it doesnot replica will error out.
-# Creating a file system of FAT type which doesn't support extent mapping.
-test_extent_support_file_system() {
-	echo "-----------Run_extent_supported_file_system_test-------------"
-	mkdir -p /tmp/vol1
-	# create a file
-	truncate -s 2100M testfat
+create_device() {
 	# losetup is used to associate block device
 	# get the free device
 	device=$(sudo losetup -f)
-	# attach the loopback device with regular disk file testfat
-	losetup $device testfat
-	# create a FAT file system
-	mkfs.fat testfat
-	# mount as a block device in /tmp/vol1
-	mount $device /tmp/vol1
+	echo $device
+}
 
-	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "1")
-	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
-	sleep 5
-
-	verify_replica_cnt "0" "Zero replica count test1"
-
-	error=$(docker logs $replica1_id 2>&1 | grep -w "underlying file system does not support extent mapping")
+verify_extent_mapping_support() {
+	error=$(docker logs "$1" 2>&1 | grep -w "failed to find extents, error: operation not permitted")
 	count=$(echo $error | wc -l)
 
 	if [ "$count" -eq 0  ]; then
 		echo "extent supported file system test failed"
 		umount /tmp/vol1
-		losetup -d $device
+		wait
+		losetup -d "$2"
 		collect_logs_and_exit
-	else
-		echo "extent support file system test --passed"
 	fi
+	echo "extent support file system test --passed"
+	return
+}
+
+# test_extent_support_file_system tests whether the file system supports
+# extent mapping. If it doesnot replica will error out.
+# Creating a file system of FAT type which doesn't support extent mapping.
+test_extent_support_file_system() {
+	echo "-----------Run_extent_supported_file_system_test-------------"
+	mkdir -p /tmp/vol1 /tmp/vol2
+	device1=$(create_device)
+	# attach the loopback device with regular disk file testfat1
+	truncate -s 2100M testfat1
+	losetup $device1 testfat1
+	# create a FAT file system
+	mkfs.fat testfat1
+	mount $device1 /tmp/vol1
+
+	device2=$(create_device)
+	truncate -s 2100M testfat2
+	losetup $device2 testfat2
+	# create a FAT file system
+	mkfs.fat testfat2
+	mount $device2 /tmp/vol2
+
+	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "1")
+	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
+	replica2_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2")
+	sleep 5
+
+	verify_replica_cnt "0" "Zero replica count test1"
+	sudo docker start $replica1_id
+	sudo docker start $replica2_id
+	sleep 5
+
+	verify_extent_mapping_support "$replica1_id1" "$device1"
+	verify_extent_mapping_support "$replica2_id2" "$device2"
+
 	umount /tmp/vol1
-	losetup -d $device
+	umount /tmp/vol2
+	wait
+	losetup -d $device1
+	losetup -d $device2
+	rm -f testfat1 testfat2
 	cleanup
 }
 
+upgrade_controller() {
+       docker stop $orig_controller_id
+       docker rm $orig_controller_id
+       orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "3")
+}
+
+upgrade_replicas() {
+       docker stop $replica1_id
+       docker rm $replica1_id
+       replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
+       docker stop $replica2_id
+       docker rm $replica2_id
+       replica2_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2")
+       docker stop $replica3_id
+       docker rm $replica3_id
+       replica3_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP3" "vol3")
+}
+
+test_upgrade() {
+	# This test is being performend because there is a change in the
+	# data structures used for communication between controller and replica.
+	echo "----------------Test_upgrade----------------"
+	docker pull $1
+	UPGRADED_JI=$JI
+	JI=$1
+
+	orig_controller_id=$(start_controller "$CONTROLLER_IP" "store1" "3")
+	replica1_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP1" "vol1")
+	replica2_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP2" "vol2")
+	replica3_id=$(start_replica "$CONTROLLER_IP" "$REPLICA_IP3" "vol3")
+
+	verify_replica_cnt "3" "Three replica count test in controller upgrade"
+	run_ios_to_test_stop_start &
+	sleep 8
+
+	JI=$UPGRADED_JI
+	if [ "$2" == "controller-replica" ]; then
+		upgrade_controller
+		upgrade_replicas
+	else
+		upgrade_replicas
+		upgrade_controller
+	fi
+	verify_replica_cnt "3" "Three replica count test in controller upgrade"
+	wait
+	test_data_integrity
+
+	cleanup
+}
+
+test_upgrades() {
+       test_upgrade "openebs/jiva:0.6.0" "controller-replica"
+       test_upgrade "openebs/jiva:0.7.0" "replica-controller"
+}
 
 prepare_test_env
 test_single_replica_stop_start
+test_replication_factor
 test_two_replica_delete
 test_replica_ip_change
 test_two_replica_stop_start
@@ -944,8 +1092,9 @@ test_three_replica_stop_start
 test_ctrl_stop_start
 test_replica_reregistration
 run_data_integrity_test
-create_snapshot "$CONTROLLER_IP"
 test_clone_feature
+test_duplicate_snapshot_failure
 test_extent_support_file_system
+test_upgrades
 run_vdbench_test_on_volume
 run_libiscsi_test_suite
