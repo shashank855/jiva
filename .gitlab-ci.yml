@@ -26,6 +26,8 @@ build-jiva:
      - sudo apt-get install -y curl open-iscsi
      - mkdir -p $HOME/gopath/bin
      - export GOPATH=$HOME/gopath/bin
+     - go env
+     - ls $(GOPATH)
    script: 
     - echo "Building-Jiva"
     - echo $COMMIT
