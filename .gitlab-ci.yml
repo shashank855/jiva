@@ -1,16 +1,3 @@
-# See docs/examples
-# http://doc.gitlab.com/ce/ci/quick_start/README.html
-# http://doc.gitlab.com/ce/ci/yaml/README.html
-
-# GitLab CI template for Go tests. Note this installs
-# a new working copy of Go in a non-standard path such
-# that sudo/root is not needed for the install stage.
-
-# note that this particular install-environment stage
-# is overly verbose in order to debug anything tricky
-# or weird in your environment - feel free to trim it 
-# down as needed
-
 stages:
  # - install-environment
   - build
@@ -24,8 +11,15 @@ build-jiva:
      - export COMMIT=${CI_COMMIT_SHA:0:8}
      - sudo apt-get install -y
      - sudo apt-get install -y curl open-iscsi
-     - mkdir -p $HOME/gopath/bin
-     - export GOPATH=$HOME/gopath/bin
+#     - mkdir -p $HOME/gopath/bin
+#     - export GOPATH=$HOME/gopath/bin
+     - export GOPATH=$HOME/go
+     - export PATH=$HOME/go/bin:$PATH
+     - mkdir -p $HOME/go/src/github.com/openebs/maya
+     - rsync -az --delete ${CI_PROJECT_DIR}/ ${HOME}/go/src/github.com/openebs/jiva/ #CI_PROJECT_DIR is full path where project is cloned
+     - go env
+     - ls $GOPATH
+     - cd ${HOME}/go/src/github.com/openebs/jiva
      - go env
      - ls $GOPATH
    script: 
