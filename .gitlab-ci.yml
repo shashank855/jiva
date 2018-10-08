@@ -27,7 +27,7 @@ build-jiva:
      - mkdir -p $HOME/gopath/bin
      - export GOPATH=$HOME/gopath/bin
      - go env
-     - ls $(GOPATH)
+     - ls $GOPATH
    script: 
     - echo "Building-Jiva"
     - echo $COMMIT
