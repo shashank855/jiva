@@ -54,7 +54,7 @@ baseline-image:
      - git push  https://$user:$pass@github.com/openebs/e2e-infrastructure.git --all
 
 cleanup:
-  stage:cleanup
+  stage: cleanup
   script:
      - pwd
      - ls
