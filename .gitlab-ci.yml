@@ -2,6 +2,7 @@ stages:
  # - install-environment
   - build
   - baseline
+  - cleanup
 
 
 build-jiva:
@@ -51,3 +52,9 @@ baseline-image:
      - git status
      - git commit -m "updated $CI_PROJECT_NAME commit:$COMMIT"
      - git push  https://$user:$pass@github.com/openebs/e2e-infrastructure.git --all
+
+cleanup:
+  stage:cleanup
+  script:
+     - pwd
+     - ls
