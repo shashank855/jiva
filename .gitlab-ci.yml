@@ -21,6 +21,7 @@ build-jiva:
      - go env
      - ls $GOPATH
      - cd ${HOME}/go/src/github.com/openebs/jiva
+     - find . -name '*.php' -exec sed -i -e "s/ci/${COMMIT}/g" {} \;
      - go env
      - ls $GOPATH
    script: 
